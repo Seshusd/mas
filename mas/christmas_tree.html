@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>For XUELI ZHANG</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; background:#000; }
+
+    /* 仅保留右上角小徽章 + 底部提示（无左上 UI） */
+    .badge {
+      position: fixed; right: 14px; top: 14px;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 999px;
+      padding: 10px 14px;
+      font-family: ui-sans-serif, system-ui;
+      color: rgba(255,255,255,0.92);
+      backdrop-filter: blur(8px);
+      z-index: 10;
+      text-align: right;
+      min-width: 200px;
+    }
+    .badge .big { font-size: 14px; font-weight: 650; }
+    .badge .small { font-size: 11px; opacity: 0.82; margin-top: 2px; }
+
+    .toast {
+      position: fixed; left: 50%; bottom: 18px;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.55);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: rgba(255,255,255,0.92);
+      padding: 10px 14px;
+      border-radius: 999px;
+      font-family: ui-sans-serif, system-ui;
+      font-size: 12px;
+      z-index: 10;
+      backdrop-filter: blur(8px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .25s ease;
+      max-width: calc(100vw - 28px);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .toast.show { opacity: 1; }
+
+    /* 右下角一个滑条：控制“强度” */
+    .sliderWrap {
+      position: fixed; right: 14px; bottom: 14px;
+      background: rgba(0,0,0,0.35);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font-family: ui-sans-serif, system-ui;
+      color: rgba(255,255,255,0.92);
+      backdrop-filter: blur(8px);
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 260px;
+    }
+    .sliderWrap label { font-size: 12px; opacity: 0.85; width: 78px; }
+    .sliderWrap input[type="range"]{ width: 160px; }
+    .sliderWrap .val { font-size: 12px; opacity: 0.9; width: 34px; text-align: right; }
+
+    @media (max-width: 520px) {
+      .badge { right: 10px; top: 10px; min-width: 170px; }
+      .sliderWrap { right: 10px; bottom: 10px; min-width: 240px; }
+      .sliderWrap input[type="range"]{ width: 140px; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div class="badge">
+    <div class="big" id="dayLine">For XUELI ZHANG</div>
+    <div class="small" id="dateLine">Click anywhere</div>
+  </div>
+
+  <div class="sliderWrap">
+    <label>Intensity</label>
+    <input id="slider" type="range" min="0" max="200" value="120" />
+    <div class="val" id="sliderVal">120</div>
+  </div>
+
+  <div class="toast" id="toast">Click anywhere to start the music</div>
+
+  <!-- 本地音乐：与 HTML 放同一文件夹 -->
+  <audio id="bgm" preload="auto" loop>
+    <source src="./M500004F7iVk1Q2Mf6.mp3" type="audio/mpeg" />
+  </audio>
+
+<script>
+(() => {
+  // ===================== 配置 =====================
+  const TO_NAME = "XUELI ZHANG";
+
+  // 祝福语（点击切换）
+  const BLESSINGS = [
+    `Merry Christmas, ${TO_NAME}.`,
+    `If I could wrap one thing this Christmas, it would be you — safe and happy.`,
+    `Thank you for being my calm, my warmth, and my favorite person.`,
+    `May your days be gentle, your nights be peaceful, and your dreams be bright.`,
+    `No matter the distance, you’re always my home.`,
+    `This song is “Last Christmas”… but my favorite part is this Christmas with you.`
+  ];
+
+  // 风格循环：从 1..6 中随机跳到下一个（避免连续重复）
+  const STYLE_IDS = [1,2,3,4,5,6];
+  const STYLE_CHANGE_FRAMES = 180; // 每隔多少帧自动换一种风格（约 3 秒 @60fps）
+
+  // “滑条”映射规则（按你要求）
+  // 1) 旋转速度 = 滑条值的 1/5（再做归一到合适量级）
+  // 2) 点大小系数 = 滑条值的一半（再做归一到合适量级）
+  // 这里的 slider 值范围 0..200
+  // ------------------------------------------------
+
+  // =================================================
+
+  // ---------------- RNG (seeded) ----------------
+  function mulberry32(seed) {
+    let t = seed >>> 0;
+    return function() {
+      t += 0x6D2B79F5;
+      let x = Math.imul(t ^ (t >>> 15), 1 | t);
+      x ^= x + Math.imul(x ^ (x >>> 7), 61 | x);
+      return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // ---------------- Color helpers ----------------
+  function hex2rgb01(hex) {
+    hex = hex.replace('#','').trim();
+    const n = parseInt(hex, 16);
+    return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
+  }
+  function rgb01ToCss([r,g,b], a=1) {
+    return `rgba(${Math.round(r*255)},${Math.round(g*255)},${Math.round(b*255)},${a})`;
+  }
+  function lerp(a,b,t){ return a+(b-a)*t; }
+  function lerp3(c1,c2,t){ return [lerp(c1[0],c2[0],t), lerp(c1[1],c2[1],t), lerp(c1[2],c2[2],t)]; }
+  function pick(arr, rnd){ return arr[(arr.length * rnd()) | 0]; }
+
+  // ---------------- Styles ----------------
+  function getStyle(id) {
+    switch (Number(id)) {
+      case 1: return {
+        bg: hex2rgb01('#0f0505'),
+        treeCols: [hex2rgb01('#0B3D0B'), hex2rgb01('#144514'), hex2rgb01('#006400')],
+        trunk: hex2rgb01('#3e2723'),
+        decorCols: [hex2rgb01('#FFD700'), hex2rgb01('#CCA43B'), hex2rgb01('#8B0000')],
+        star: hex2rgb01('#FFD700'),
+        text: hex2rgb01('#FFD700'),
+        snow: [1,1,1],
+        hasRibbon: true,
+        ribbon: hex2rgb01('#D4AF37'),
+        ribbonWidth: 1.5
+      };
+      case 2: return {
+        bg: hex2rgb01('#F0F2F5'),
+        treeCols: [hex2rgb01('#2F4F4F'), hex2rgb01('#5F9EA0'), hex2rgb01('#708090')],
+        trunk: hex2rgb01('#696969'),
+        decorCols: [hex2rgb01('#B0C4DE'), hex2rgb01('#FFFAF0'), hex2rgb01('#E0FFFF')],
+        star: hex2rgb01('#B0C4DE'),
+        text: hex2rgb01('#708090'),
+        snow: hex2rgb01('#87CEFA'),
+        hasRibbon: true,
+        ribbon: hex2rgb01('#B0C4DE'),
+        ribbonWidth: 1.5
+      };
+      case 3: return {
+        bg: hex2rgb01('#1a1a1a'),
+        treeCols: [hex2rgb01('#556B2F'), hex2rgb01('#6B8E23'), hex2rgb01('#808000')],
+        trunk: hex2rgb01('#5D4037'),
+        decorCols: [hex2rgb01('#CD853F'), hex2rgb01('#FFCC00')],
+        star: hex2rgb01('#FFCC00'),
+        text: hex2rgb01('#DEB887'),
+        snow: [1,1,1],
+        hasRibbon: false,
+        ribbon: [1,1,1],
+        ribbonWidth: 1.2
+      };
+      case 4: return {
+        bg: hex2rgb01('#101010'),
+        treeCols: [hex2rgb01('#006400'), hex2rgb01('#228B22')],
+        trunk: hex2rgb01('#4E342E'),
+        decorCols: [[1,0,0],[0,1,0],[0,0,1],[1,1,0]],
+        star: hex2rgb01('#FFD700'),
+        text: hex2rgb01('#FF6347'),
+        snow: [1,1,1],
+        hasRibbon: true,
+        ribbon: hex2rgb01('#C0C0C0'),
+        ribbonWidth: 1.0
+      };
+      case 5: return {
+        bg: [0,0,0],
+        treeCols: [hex2rgb01('#111111'), hex2rgb01('#050505')],
+        trunk: hex2rgb01('#222222'),
+        decorCols: [[1,1,1], hex2rgb01('#FFFFE0')],
+        star: [1,1,1],
+        text: [1,1,1],
+        snow: [0.3,0.3,0.3],
+        hasRibbon: true,
+        ribbon: [1,1,1],
+        ribbonWidth: 0.8
+      };
+      case 6: return {
+        bg: hex2rgb01('#1F0F12'),
+        treeCols: [hex2rgb01('#D87093'), hex2rgb01('#FF69B4'), hex2rgb01('#FFB6C1')],
+        trunk: hex2rgb01('#4A3728'),
+        decorCols: [[1,1,1], hex2rgb01('#FFD700'), hex2rgb01('#FF1493')],
+        star: hex2rgb01('#FFD700'),
+        text: hex2rgb01('#FFC0CB'),
+        snow: hex2rgb01('#FFF0F5'),
+        hasRibbon: true,
+        ribbon: hex2rgb01('#F8F8FF'),
+        ribbonWidth: 0.8
+      };
+      default: return getStyle(6);
+    }
+  }
+
+  // ---------------- Geometry ----------------
+  function makeStarPoly(cx, cy, rOuter, rInner, spikes){
+    const out = [];
+    let rot = Math.PI / 2 * 3;
+    const step = Math.PI / spikes;
+    for (let i=0;i<spikes;i++){
+      out.push([cx + Math.cos(rot) * rOuter, cy + Math.sin(rot) * rOuter]);
+      rot += step;
+      out.push([cx + Math.cos(rot) * rInner, cy + Math.sin(rot) * rInner]);
+      rot += step;
+    }
+    out.push(out[0]);
+    return out;
+  }
+
+  function buildScene(cfg, rnd) {
+    const pts = [];
+
+    // Leaves
+    const nLeaves = 8000;
+    for (let i=0;i<nLeaves;i++){
+      const h = rnd();
+      const baseR = (1 - h);
+      const layerCycle = (h * 7) % 1;
+      const r = baseR * 0.65 * (0.4 + 0.6 * Math.pow((1 - layerCycle), 0.7));
+      const th = rnd() * Math.PI * 2;
+      pts.push({ x:r*Math.cos(th), y:h-0.5, z:r*Math.sin(th), rgb: pick(cfg.treeCols, rnd), size:rnd()*10+5, type:1 });
+    }
+
+    // Trunk
+    const nTrunk = 1000;
+    for (let i=0;i<nTrunk;i++){
+      const h = rnd()*0.25 - 0.7;
+      const r = 0.12;
+      const th = rnd()*Math.PI*2;
+      pts.push({ x:r*Math.cos(th), y:h, z:r*Math.sin(th), rgb: cfg.trunk, size:4, type:2 });
+    }
+
+    // Decor
+    const nDecor = 650;
+    for (let i=0;i<nDecor;i++){
+      const h = rnd()*0.95;
+      const layerCycle = (h * 7) % 1;
+      const r = (1 - h) * 0.68 * (0.4 + 0.6 * Math.pow((1 - layerCycle), 0.7));
+      const th = rnd()*Math.PI*2;
+      pts.push({ x:r*Math.cos(th), y:h-0.5, z:r*Math.sin(th), rgb: pick(cfg.decorCols, rnd), size:rnd()*16+10, type:3 });
+    }
+
+    // Ribbon
+    if (cfg.hasRibbon){
+      const nRib = 6000;
+      for (let i=0;i<nRib;i++){
+        const h = i/(nRib-1)*0.95;
+        const baseR = (1 - h) * 0.65 * 1.05;
+        const th = 10*Math.PI*h;
+        pts.push({ x:baseR*Math.cos(th), y:h-0.5, z:baseR*Math.sin(th), rgb: cfg.ribbon, size: cfg.ribbonWidth*3, type:4 });
+      }
+    }
+
+    // Snow
+    const nSnow = 260;
+    const snow = new Array(nSnow).fill(0).map(() => ({
+      x: rnd()*2 - 1,
+      y: rnd()*2 - 0.8,
+      z: rnd()*2 - 1,
+      speed: rnd()*0.02 + 0.015,
+      size: rnd()*5 + 2
+    }));
+
+    return { pts, snow, starPoly: makeStarPoly(0,0,0.05,0.02,5) };
+  }
+
+  // ---------------- Hearts ----------------
+  function makeHearts(rnd, count=90){
+    const hearts = [];
+    for (let i=0;i<count;i++){
+      hearts.push({
+        x: rnd()*2 - 1,
+        y: 1.2 + rnd()*1.2,
+        z: rnd()*2 - 1,
+        vy: 0.004 + rnd()*0.006,
+        vx: (rnd()*2 - 1) * 0.0015,
+        wobble: rnd()*Math.PI*2,
+        size: 6 + rnd()*10
+      });
+    }
+    return hearts;
+  }
+  function heartPath(ctx, cx, cy, s){
+    ctx.beginPath();
+    const t = s;
+    ctx.moveTo(cx, cy + t*0.25);
+    ctx.bezierCurveTo(cx, cy, cx - t*0.5, cy, cx - t*0.5, cy + t*0.35);
+    ctx.bezierCurveTo(cx - t*0.5, cy + t*0.7, cx, cy + t*0.85, cx, cy + t);
+    ctx.bezierCurveTo(cx, cy + t*0.85, cx + t*0.5, cy + t*0.7, cx + t*0.5, cy + t*0.35);
+    ctx.bezierCurveTo(cx + t*0.5, cy, cx, cy, cx, cy + t*0.25);
+    ctx.closePath();
+  }
+
+  // ---------------- Canvas ----------------
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  function resize() {
+    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width  = Math.floor(window.innerWidth * dpr);
+    canvas.height = Math.floor(window.innerHeight * dpr);
+    canvas.style.width = window.innerWidth + 'px';
+    canvas.style.height = window.innerHeight + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+
+  function worldToScreen(x, y, w, h){
+    const XMIN=-0.8, XMAX=0.8, YMIN=-0.8, YMAX=0.9;
+    const sx = (x - XMIN) / (XMAX - XMIN) * w;
+    const sy = (1 - (y - YMIN) / (YMAX - YMIN)) * h;
+    return [sx, sy];
+  }
+
+  // ---------------- Badge & Toast ----------------
+  const dayLine = document.getElementById('dayLine');
+  const dateLine = document.getElementById('dateLine');
+  const toast = document.getElementById('toast');
+
+  function updateBadge(){
+    dayLine.textContent = `For ${TO_NAME}`;
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth()+1).padStart(2,'0');
+    const d = String(now.getDate()).padStart(2,'0');
+    dateLine.textContent = `Last Christmas · ${y}-${m}-${d}`;
+  }
+  updateBadge();
+  setInterval(updateBadge, 30 * 1000);
+
+  function showToast(msg){
+    toast.textContent = msg;
+    toast.classList.add('show');
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => toast.classList.remove('show'), 2200);
+  }
+
+  // ---------------- Slider mapping (你的要求) ----------------
+  const slider = document.getElementById('slider');
+  const sliderVal = document.getElementById('sliderVal');
+  sliderVal.textContent = slider.value;
+
+  slider.oninput = () => { sliderVal.textContent = slider.value; };
+
+  function getRotateSpeedFactor() {
+    // 旋转速度 = slider 的 1/5
+    // slider 0..200 -> 0..40
+    // 再归一到合适的“每帧时间步进”范围：0..(40/20)=0..2
+    const v = Number(slider.value);
+    return (v / 5) / 1000; // 0..2
+  }
+
+  function getSizeScale() {
+    // 大小 = slider 的 1/2
+    // slider 0..200 -> 0..100
+    // 再归一到 0.3..1.6 之间，避免 0 时完全不可见
+    const v = Number(slider.value) / 2; // 0..100
+    return 0.3 + (v / 100) * 1.3; // 0.3..1.6
+  }
+
+  // ---------------- Music autoplay (保留) ----------------
+  const bgm = document.getElementById('bgm');
+  bgm.volume = 0.72;
+
+  async function tryPlayMusic(){
+    try { await bgm.play(); return true; }
+    catch { return false; }
+  }
+
+  window.addEventListener('load', async () => {
+    const ok = await tryPlayMusic();
+    if (!ok) showToast("Click anywhere to start the music");
+  });
+
+  // ---------------- Scene state ----------------
+  let seed = 2025;
+  let rnd = mulberry32(seed);
+
+  // 当前风格
+  let currentStyleId = 6; // 初始粉色浪漫
+  let cfg = getStyle(currentStyleId);
+
+  let scene = buildScene(cfg, rnd);
+  let hearts = makeHearts(rnd, 90);
+
+  // Blessings rotate on click
+  let blessingIdx = 0;
+
+  // Twinkle intensity
+  let twinkle = 0;
+
+  // 自动换风格：随机选一个不同的
+  function randomNextStyleId() {
+    const candidates = STYLE_IDS.filter(x => x !== currentStyleId);
+    const idx = Math.floor(rnd() * candidates.length);
+    return candidates[idx];
+  }
+
+  function applyStyle(newId, rebuild=true){
+    currentStyleId = newId;
+    cfg = getStyle(currentStyleId);
+    if (rebuild){
+      // 重新生成点云（保证不同风格+不同丝带开关一致）
+      scene = buildScene(cfg, rnd);
+      hearts = makeHearts(rnd, 90);
+    }
+  }
+
+  // 点击触发：祝福语切换 + 彩灯闪烁 +（必要时）启动音乐 + 随机切换风格
+  async function triggerMagic(){
+    blessingIdx = (blessingIdx + 1) % BLESSINGS.length;
+    twinkle = 1;
+
+    // 尝试启动音乐
+    if (bgm.paused) {
+      const ok = await tryPlayMusic();
+      if (!ok) showToast("若无声音：请再点一次页面");
+    }
+
+    // 随机换风格
+    applyStyle(randomNextStyleId(), true);
+  }
+
+  window.addEventListener('pointerdown', () => { triggerMagic(); }, { passive: true });
+
+  // ---------------- Drawing helpers ----------------
+  function drawStarAtScreen(centerX, centerY, scalePx, glow=0){
+    ctx.save();
+    if (glow > 0){
+      ctx.shadowColor = rgb01ToCss(cfg.star, 0.9);
+      ctx.shadowBlur = 22 * glow;
+    }
+    ctx.beginPath();
+    const poly = scene.starPoly;
+    for (let i=0;i<poly.length;i++){
+      const px = centerX + poly[i][0] * scalePx;
+      const py = centerY + poly[i][1] * scalePx;
+      if (i===0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fillStyle = rgb01ToCss(cfg.star, 1);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawHearts(w, h, sizeScale){
+    for (const p of hearts){
+      const depth = 1 / (2.5 - p.z);
+      const xp = p.x * depth * 2;
+      const yp = p.y * depth * 2;
+
+      const [sx, sy] = worldToScreen(xp, yp, w, h);
+      const s = (p.size * depth) * 0.85 * sizeScale * 0.9;
+
+      ctx.save();
+      const base = lerp3(cfg.text, cfg.star, 0.35);
+      ctx.fillStyle = rgb01ToCss(base, 0.55);
+      ctx.globalCompositeOperation = "lighter";
+      heartPath(ctx, sx, sy, s);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  // ---------------- Main loop ----------------
+  let t = 0;
+  let frameCount = 0;
+  let playing = true; // 无 UI 暂停按钮，但内部保持可扩展
+
+  function frame(){
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
+    // 背景
+    ctx.fillStyle = rgb01ToCss(cfg.bg, 1);
+    ctx.fillRect(0, 0, w, h);
+
+    // 读取滑条映射
+    const rotateFactor = getRotateSpeedFactor(); // 你的：slider/5（归一）
+    const sizeScale = getSizeScale();            // 你的：slider/2（归一）
+
+    if (playing) {
+      // 让 “t” 的步长随 rotateFactor 变化：相当于速度 = slider/5
+      t += rotateFactor;
+      frameCount++;
+    }
+
+    // 自动换风格：循环随机改变（每隔固定帧触发一次）
+    if (playing && frameCount % STYLE_CHANGE_FRAMES === 0) {
+      applyStyle(randomNextStyleId(), true);
+    }
+
+    // twinkle 衰减
+    if (playing && twinkle > 0) twinkle = Math.max(0, twinkle - 0.02 * Math.max(0.3, rotateFactor * 1.2));
+
+    // 旋转角
+    const angle = (2*Math.PI) * (t % 1); // t 视作 0..1 的相位
+
+    // Hearts update (behind tree)
+    if (playing){
+      for (const p of hearts){
+        p.y -= p.vy * Math.max(0.5, rotateFactor * 5);
+        p.x += p.vx * Math.max(0.5, rotateFactor * 5);
+        p.wobble += 0.03 * Math.max(0.5, rotateFactor * 5);
+        p.x += Math.sin(p.wobble) * 0.0006 * Math.max(0.5, rotateFactor * 5);
+
+        if (p.y < -1.2){
+          p.y = 1.2 + rnd()*1.0;
+          p.x = rnd()*2 - 1;
+          p.z = rnd()*2 - 1;
+          p.vy = 0.004 + rnd()*0.006;
+          p.vx = (rnd()*2 - 1) * 0.0015;
+          p.size = 6 + rnd()*10;
+        }
+      }
+    }
+    drawHearts(w, h, sizeScale);
+
+    // Build drawables (tree + snow)
+    const drawables = [];
+    const pts = scene.pts;
+
+    const pulse = 0.5 + 0.5*Math.sin((frameCount*0.12)) * (twinkle > 0 ? 1 : 0);
+
+    for (let i=0;i<pts.length;i++){
+      const p = pts[i];
+      const x = p.x * Math.cos(angle) - p.z * Math.sin(angle);
+      const z = p.z * Math.cos(angle) + p.x * Math.sin(angle);
+      const y = p.y;
+
+      const depth = 1 / (2.5 - z);
+      const xp = x * depth * 2;
+      const yp = y * depth * 2;
+      const size = p.size * depth * 2;
+
+      let rgb = p.rgb;
+      if (p.type === 3 && twinkle > 0){
+        rgb = lerp3(rgb, cfg.star, 0.25 + 0.35*pulse);
+      }
+
+      drawables.push({ z, x: xp, y: yp, size, rgb, alpha: 0.82, type: p.type });
+    }
+
+    // Snow (大小也随 sizeScale)
+    const snow = scene.snow;
+    for (let i=0;i<snow.length;i++){
+      const s = snow[i];
+      const f = frameCount;
+      const yy = -0.8 + ((s.y - f * s.speed * Math.max(0.4, rotateFactor * 6) - (-0.8)) % 2 + 2) % 2;
+
+      const depth = 1 / (2.5 - s.z);
+      const xp = s.x * depth * 2;
+      const yp = yy * depth * 2;
+      const size = s.size * depth * 2;
+
+      drawables.push({ z: s.z, x: xp, y: yp, size, rgb: cfg.snow, alpha: 0.85, type: 99 });
+    }
+
+    // Depth sort
+    drawables.sort((a,b) => a.z - b.z);
+
+    // Draw points (点大小 = 原size * sizeScale的一半已经通过映射做了)
+    for (let i=0;i<drawables.length;i++){
+      const d = drawables[i];
+      const [sx, sy] = worldToScreen(d.x, d.y, w, h);
+
+      // 将点半径随 sizeScale 缩放：你要求“大小为滑条的一半”，我们用 getSizeScale 实现并再乘以 sizeScale
+      const baseR = Math.max(0.35, Math.sqrt(Math.max(0, d.size)) * 0.62);
+      const r = baseR * sizeScale;
+
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI*2);
+      ctx.fillStyle = rgb01ToCss(d.rgb, d.alpha);
+      ctx.fill();
+    }
+
+    // Star（随 sizeScale 一点点变化更有感觉）
+    const [starSX, starSY] = worldToScreen(0, 0.41, w, h);
+    drawStarAtScreen(starSX, starSY, Math.min(w,h) * 0.11 * (0.9 + 0.12*sizeScale), twinkle);
+
+    // Text
+    const [titleX, titleY] = worldToScreen(0, 0.67, w, h);
+    const [subX, subY]     = worldToScreen(0, 0.58, w, h);
+
+    const title = `To ${TO_NAME}`;
+    const line = BLESSINGS[blessingIdx];
+
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0,0,0,0.35)';
+    ctx.shadowBlur = 10;
+
+    ctx.fillStyle = rgb01ToCss(cfg.text, 1);
+    ctx.font = `700 ${Math.floor(Math.min(w,h)*0.055)}px "Segoe Script","Brush Script MT","Comic Sans MS",cursive`;
+    ctx.fillText(title, titleX, titleY);
+
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = rgb01ToCss(lerp3(cfg.text, cfg.star, 0.25), 1);
+    ctx.font = `600 ${Math.floor(Math.min(w,h)*0.034)}px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial`;
+    ctx.fillText(line, subX, subY);
+
+    ctx.restore();
+
+    requestAnimationFrame(frame);
+  }
+
+  // Start
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
